@@ -35,6 +35,7 @@ interface Track {
   name: string;
   artists: { name: string; id?: string }[];
   album: {
+    name?: string;
     images: { url: string }[];
     release_date?: string;
   };

@@ -1,0 +1,5 @@
+project_id = "headtap"
+
+[functions.make-server-a9c438e5]
+verify_jwt = true
+entrypoint = "./functions/make-server-a9c438e5/index.ts"

@@ -1,9 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Card } from './ui/card';
 import { Badge } from './ui/badge';
 import { Music2, Heart, Users, TrendingUp, Sparkles, Play, X, Award, Radio, Headphones } from 'lucide-react';
 import { mockAlltimeArtists, mockAlltimeTracks } from '../utils/mockData';
+import { libraryArtistCount, genreSummary } from '../utils/musicSummary';
+import { toast } from 'sonner';
 import { SoundProfile } from './SoundProfile';
+import { ConcertImage } from './ConcertImage';
 
 type Artist = {
   id: string;
@@ -26,88 +29,59 @@ type Track = {
 interface MusicProfileProps {
   topArtists: Artist[];
   topTracks: Track[];
-  savedTracks: any[];
+  savedTracks: Track[];
   loading: boolean;
   sessionId?: string | null;
   projectId?: string;
   publicAnonKey?: string;
   demoMode?: boolean;
+  libraryArtists?: any[];
+  libraryProgress?: string;
+  libraryLoading?: boolean;
+  libraryError?: string | null;
 }
 
-export function MusicProfile({ topArtists, topTracks, savedTracks, loading, sessionId, projectId, publicAnonKey, demoMode }: MusicProfileProps) {
+export function MusicProfile({ topArtists, topTracks, savedTracks, loading, sessionId, projectId, publicAnonKey, demoMode, libraryLoading = false, libraryError, libraryArtists = [], libraryProgress }: MusicProfileProps) {
   const [selectedGenre, setSelectedGenre] = useState<string | null>(null);
   const [artistTimeRange, setArtistTimeRange] = useState<'recent' | 'alltime'>('recent');
   const [songTimeRange, setSongTimeRange] = useState<'recent' | 'alltime'>('recent');
   const [alltimeArtists, setAlltimeArtists] = useState<Artist[]>([]);
   const [alltimeTracks, setAlltimeTracks] = useState<Track[]>([]);
-  const [loadingAlltime, setLoadingAlltime] = useState(false);
-  const [totalUniqueArtists, setTotalUniqueArtists] = useState<number>(0);
-  const [loadingTotalArtists, setLoadingTotalArtists] = useState(false);
-
-  // Fetch total unique artists from all saved tracks
-  useEffect(() => {
-    const fetchTotalArtists = async () => {
-      // In demo mode, set to 97
-      if (demoMode) {
-        setTotalUniqueArtists(97);
-        return;
-      }
-      
-      if (!sessionId || !projectId || !publicAnonKey) return;
-      
-      setLoadingTotalArtists(true);
-      try {
-        const response = await fetch(
-          `https://${projectId}.supabase.co/functions/v1/make-server-a9c438e5/spotify/saved-artists?session=${sessionId}`,
-          { headers: { Authorization: `Bearer ${publicAnonKey}` } }
-        );
-        
-        if (response.ok) {
-          const data = await response.json();
-          setTotalUniqueArtists(data.total || 0);
-        }
-      } catch (error) {
-        console.error('Error fetching total artists:', error);
-      } finally {
-        setLoadingTotalArtists(false);
-      }
-    };
-    
-    fetchTotalArtists();
-  }, [sessionId, projectId, publicAnonKey, demoMode]);
+  const [loadingArtists, setLoadingArtists] = useState(false);
+  const [loadingTracks, setLoadingTracks] = useState(false);
+  const totalUniqueArtists = libraryArtistCount(savedTracks);
+  const loadingTotalArtists = libraryLoading;
+  const breakdown = genreSummary(topArtists);
 
   // Fetch all-time data when toggle is switched
   const fetchAlltimeArtists = async () => {
     // In demo mode, use mock data
     if (demoMode) {
       if (alltimeArtists.length > 0) return; // Already set
-      setLoadingAlltime(true);
-      // Simulate loading delay
-      setTimeout(() => {
-        setAlltimeArtists(mockAlltimeArtists);
-        setLoadingAlltime(false);
-      }, 500);
+      setAlltimeArtists(mockAlltimeArtists);
       return;
     }
     
     if (!sessionId || !projectId || !publicAnonKey) return;
     if (alltimeArtists.length > 0) return; // Already fetched
     
-    setLoadingAlltime(true);
+    setLoadingArtists(true);
     try {
       const response = await fetch(
         `https://${projectId}.supabase.co/functions/v1/make-server-a9c438e5/spotify/top-artists?session=${sessionId}&time_range=long_term`,
-        { headers: { Authorization: `Bearer ${publicAnonKey}` } }
+        { headers: { Authorization: `Bearer ${publicAnonKey}` }, signal: AbortSignal.timeout(30000) }
       );
       
+      if (!response.ok) throw new Error(`Spotify request failed (${response.status})`);
       if (response.ok) {
         const data = await response.json();
         setAlltimeArtists(data.items || []);
       }
     } catch (error) {
-      console.error('Error fetching all-time artists:', error);
+      setArtistTimeRange('recent');
+      toast.error('Could not load all-time artists. Showing recent music; try again.');
     } finally {
-      setLoadingAlltime(false);
+      setLoadingArtists(false);
     }
   };
 
@@ -115,38 +89,36 @@ export function MusicProfile({ topArtists, topTracks, savedTracks, loading, sess
     // In demo mode, use mock data
     if (demoMode) {
       if (alltimeTracks.length > 0) return; // Already set
-      setLoadingAlltime(true);
-      // Simulate loading delay
-      setTimeout(() => {
-        setAlltimeTracks(mockAlltimeTracks);
-        setLoadingAlltime(false);
-      }, 500);
+      setAlltimeTracks(mockAlltimeTracks);
       return;
     }
     
     if (!sessionId || !projectId || !publicAnonKey) return;
     if (alltimeTracks.length > 0) return; // Already fetched
     
-    setLoadingAlltime(true);
+    setLoadingTracks(true);
     try {
       const response = await fetch(
         `https://${projectId}.supabase.co/functions/v1/make-server-a9c438e5/spotify/top-tracks?session=${sessionId}&time_range=long_term`,
-        { headers: { Authorization: `Bearer ${publicAnonKey}` } }
+        { headers: { Authorization: `Bearer ${publicAnonKey}` }, signal: AbortSignal.timeout(30000) }
       );
       
+      if (!response.ok) throw new Error(`Spotify request failed (${response.status})`);
       if (response.ok) {
         const data = await response.json();
         setAlltimeTracks(data.items || []);
       }
     } catch (error) {
-      console.error('Error fetching all-time tracks:', error);
+      setSongTimeRange('recent');
+      toast.error('Could not load all-time tracks. Showing recent music; try again.');
     } finally {
-      setLoadingAlltime(false);
+      setLoadingTracks(false);
     }
   };
 
   // Fetch all-time data when toggled
   const handleArtistTimeRangeChange = (range: 'recent' | 'alltime') => {
+    if (loadingArtists) return;
     setArtistTimeRange(range);
     if (range === 'alltime') {
       fetchAlltimeArtists();
@@ -154,6 +126,7 @@ export function MusicProfile({ topArtists, topTracks, savedTracks, loading, sess
   };
 
   const handleSongTimeRangeChange = (range: 'recent' | 'alltime') => {
+    if (loadingTracks) return;
     setSongTimeRange(range);
     if (range === 'alltime') {
       fetchAlltimeTracks();
@@ -161,26 +134,8 @@ export function MusicProfile({ topArtists, topTracks, savedTracks, loading, sess
   };
 
   // Determine which data to display
-  const displayArtists = artistTimeRange === 'recent' ? topArtists : alltimeArtists;
-  const displayTracks = songTimeRange === 'recent' ? topTracks : alltimeTracks;
-
-  // Prefetch all-time data in the background on mount
-  useEffect(() => {
-    if (sessionId && projectId && publicAnonKey) {
-      // Start fetching all-time data in background after component mounts
-      const timer = setTimeout(() => {
-        // Only fetch if we haven't already
-        if (alltimeArtists.length === 0) {
-          fetchAlltimeArtists();
-        }
-        if (alltimeTracks.length === 0) {
-          fetchAlltimeTracks();
-        }
-      }, 1000); // Wait 1 second after mount to not interfere with initial load
-      
-      return () => clearTimeout(timer);
-    }
-  }, [sessionId, projectId, publicAnonKey]);
+  const displayArtists = artistTimeRange === 'recent' || loadingArtists ? topArtists : alltimeArtists;
+  const displayTracks = songTimeRange === 'recent' || loadingTracks ? topTracks : alltimeTracks;
 
   if (loading) {
     return (
@@ -382,32 +337,30 @@ export function MusicProfile({ topArtists, topTracks, savedTracks, loading, sess
     return acc;
   }, {} as Record<number, Track[]>);
 
+
   return (
     <div className="space-y-8">
       {/* Music Personality Card - ENHANCED WITH PERSONALIZATION */}
-      <Card className="overflow-hidden relative bg-gradient-to-br from-orange-600 via-orange-500 to-amber-500 text-white shadow-2xl">
-        <div className="absolute top-0 right-0 w-64 h-64 bg-black/10 rounded-full blur-3xl"></div>
-        <div className="absolute bottom-0 left-0 w-48 h-48 bg-black/20 rounded-full blur-3xl"></div>
+      <Card className="overflow-hidden relative bg-gradient-to-br from-orange-600 via-orange-500 to-amber-500 text-white border-0 shadow-none gap-0">
         
-        <div className="relative p-8">
+        <div className="relative p-5 sm:p-6">
           {/* Header Section */}
-          <div className="mb-6">
+          <div className="mb-3">
             <Badge className="bg-black/20 text-white border-black/30 mb-3">
               Your Music Personality
             </Badge>
-            <h2 className="text-5xl font-bold mb-3 leading-tight">
+            <h2 className="text-2xl sm:text-3xl font-bold mb-2 leading-tight">
               {musicPersonality.personality}
             </h2>
-            <p className="text-white/95 text-xl max-w-2xl leading-relaxed">
+            <p className="text-orange-50 text-base max-w-2xl leading-relaxed">
               {musicPersonality.description}
             </p>
-            <p className="text-2xl font-light italic text-white/80 mt-4 border-l-4 border-white/40 pl-4">
-              {musicPersonality.tagline}
-            </p>
+            <p className="mt-3 text-base italic text-white border-l-2 border-white/50 pl-3">{musicPersonality.tagline}</p>
+
           </div>
 
           {/* Personality Badges */}
-          <div className="flex flex-wrap items-center gap-2 mb-6">
+          <div className="flex flex-wrap items-center gap-2 mb-3">
             {musicPersonality.badges.map((badge, idx) => (
               <Badge key={idx} className="bg-black/30 text-white border-white/20 px-3 py-1 text-sm font-semibold backdrop-blur-sm">
                 {badge}
@@ -415,6 +368,7 @@ export function MusicProfile({ topArtists, topTracks, savedTracks, loading, sess
             ))}
           </div>
 
+          <div className="pt-3">
           {/* Personalized Details Section */}
           <div className="bg-black/20 backdrop-blur-md rounded-xl p-6 mb-6 border border-white/10">
             <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
@@ -493,8 +447,8 @@ export function MusicProfile({ topArtists, topTracks, savedTracks, loading, sess
                 </div>
               ) : (
                 <>
-                  <div className="text-3xl font-bold">{totalUniqueArtists}</div>
-                  <div className="text-xs text-white/60 mt-1">All time</div>
+                  <div className="text-3xl font-bold">{libraryError ? '—' : totalUniqueArtists}</div>
+                  <div className="text-xs text-white/60 mt-1">In loaded library</div>
                 </>
               )}
             </div>
@@ -503,7 +457,7 @@ export function MusicProfile({ topArtists, topTracks, savedTracks, loading, sess
                 <Heart className="w-4 h-4 text-amber-200" />
                 <span className="text-xs text-white/70">Library</span>
               </div>
-              <div className="text-3xl font-bold">{savedTracks.length || topTracks.length}</div>
+              <div className="text-3xl font-bold">{libraryLoading ? '…' : libraryError ? '—' : savedTracks.length}</div>
               <div className="text-xs text-white/60 mt-1">Saved tracks</div>
             </div>
           </div>
@@ -534,12 +488,13 @@ export function MusicProfile({ topArtists, topTracks, savedTracks, loading, sess
               </p>
             </div>
           )}
+          </div>
         </div>
       </Card>
 
       {/* Recent Favorites Section - DIFFERENT STYLE */}
       <div>
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div className="flex items-center gap-2">
             <div className="bg-gradient-to-br from-orange-600 to-amber-600 rounded-full p-2">
               <Users className="w-5 h-5 text-white" />
@@ -560,6 +515,8 @@ export function MusicProfile({ topArtists, topTracks, savedTracks, loading, sess
               Recent (6mo)
             </button>
             <button
+              disabled={loadingArtists}
+              aria-pressed={artistTimeRange === 'alltime'}
               onClick={() => handleArtistTimeRangeChange('alltime')}
               className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
                 artistTimeRange === 'alltime'
@@ -567,20 +524,19 @@ export function MusicProfile({ topArtists, topTracks, savedTracks, loading, sess
                   : 'text-gray-600 hover:text-gray-900'
               }`}
             >
-              All Time
+              {loadingArtists ? 'Loading…' : 'Long term'}
             </button>
           </div>
         </div>
         
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+        {!loadingArtists && displayArtists.length === 0 && <p className="text-stone-600 py-4">Spotify hasn’t returned ranked artists for this period yet. Try another period after listening to more music.</p>}
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-4" aria-busy={loadingArtists}>
           {displayArtists.slice(0, 6).map((artist, index) => (
             <Card key={artist.id} className="overflow-hidden hover:shadow-xl transition-all hover:scale-105 group">
               <div className="relative w-full pb-[100%]">
-                <img
-                  src={artist.images[0]?.url || 'https://via.placeholder.com/300'}
-                  alt={artist.name}
-                  className="absolute inset-0 w-full h-full object-cover"
-                />
+                <div className="absolute inset-0">
+                  <ConcertImage src={artist.images?.[0]?.url} artist={artist.name} eager={index < 2} />
+                </div>
                 <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent opacity-80 group-hover:opacity-90 transition-opacity" />
                 <div className="absolute top-2 left-2">
                   <div className="bg-orange-600 text-white rounded-full w-8 h-8 flex items-center justify-center text-xs font-bold shadow-lg">
@@ -603,7 +559,7 @@ export function MusicProfile({ topArtists, topTracks, savedTracks, loading, sess
 
       {/* Top Songs Section with Time Range Tabs */}
       <div>
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div className="flex items-center gap-2">
             <div className="bg-gradient-to-br from-orange-600 to-amber-600 rounded-full p-2">
               <Music2 className="w-5 h-5 text-white" />
@@ -624,6 +580,8 @@ export function MusicProfile({ topArtists, topTracks, savedTracks, loading, sess
               Recent (6mo)
             </button>
             <button
+              disabled={loadingTracks}
+              aria-pressed={songTimeRange === 'alltime'}
               onClick={() => handleSongTimeRangeChange('alltime')}
               className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
                 songTimeRange === 'alltime'
@@ -631,20 +589,17 @@ export function MusicProfile({ topArtists, topTracks, savedTracks, loading, sess
                   : 'text-gray-600 hover:text-gray-900'
               }`}
             >
-              All Time
+              {loadingTracks ? 'Loading…' : 'Long term'}
             </button>
           </div>
         </div>
         
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {!loadingTracks && displayTracks.length === 0 && <p className="text-stone-600 py-4">Spotify hasn’t returned ranked songs for this period yet.</p>}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" aria-busy={loadingTracks}>
           {displayTracks.slice(0, 6).map((track, index) => (
             <Card key={track.id} className="overflow-hidden hover:shadow-xl transition-all hover:scale-102 group">
               <div className="relative h-48">
-                <img
-                  src={track.album.images[0]?.url || 'https://via.placeholder.com/300'}
-                  alt={track.name}
-                  className="w-full h-full object-cover"
-                />
+                <ConcertImage src={track.album?.images?.[0]?.url} artist={track.name} />
                 <div className="absolute inset-0 bg-gradient-to-t from-black via-black/50 to-transparent" />
                 <div className="absolute top-3 left-3">
                   <div className="bg-orange-600 text-white rounded-full w-8 h-8 flex items-center justify-center text-sm font-bold shadow-lg">
@@ -662,6 +617,8 @@ export function MusicProfile({ topArtists, topTracks, savedTracks, loading, sess
           ))}
         </div>
       </div>
+
+
 
       {/* Genre Universe Graph - NEW COMPREHENSIVE VISUALIZATION */}
       {topArtists.length > 0 && (

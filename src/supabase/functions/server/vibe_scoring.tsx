@@ -550,7 +550,8 @@ export async function getSpotifyArtistData(
     
     const searchUrl = `https://api.spotify.com/v1/search?q=${encodeURIComponent(cleanedName)}&type=artist&limit=5`;
     const searchResponse = await fetch(searchUrl, {
-      headers: { 'Authorization': `Bearer ${accessToken}` }
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(6000)
     });
 
     if (!searchResponse.ok) {
@@ -570,7 +571,7 @@ export async function getSpotifyArtistData(
     const originalLower = artistName.toLowerCase().trim();
     const cleanedLower = cleanedName.toLowerCase().trim();
     
-    let bestArtist = artists[0]; // Default to first result
+    let bestArtist: any = null; // Avoid attaching a different artist’s photo and popularity.
     
     // Look for exact or very close match in top 5 results
     for (const artist of artists) {
@@ -593,64 +594,19 @@ export async function getSpotifyArtistData(
       }
     }
     
+    if (!bestArtist) return null;
     const artist = bestArtist;
     console.log(`Using Spotify artist: "${artist.name}" (popularity: ${artist.popularity}) for search: "${artistName}"`);
 
-    const topTracksUrl = `https://api.spotify.com/v1/artists/${artist.id}/top-tracks?market=US`;
-    const tracksResponse = await fetch(topTracksUrl, {
-      headers: { 'Authorization': `Bearer ${accessToken}` }
-    });
-
-    let audioFeatures = {};
-    
-    if (tracksResponse.ok) {
-      const tracksData = await tracksResponse.json();
-      const trackIds = tracksData.tracks.slice(0, 5).map((t: any) => t.id);
-
-      if (trackIds.length > 0) {
-        const featuresUrl = `https://api.spotify.com/v1/audio-features?ids=${trackIds.join(',')}`;
-        const featuresResponse = await fetch(featuresUrl, {
-          headers: { 'Authorization': `Bearer ${accessToken}` }
-        });
-
-        if (featuresResponse.ok) {
-          const featuresData = await featuresResponse.json();
-          const features = featuresData.audio_features.filter((f: any) => f !== null);
-
-          if (features.length > 0) {
-            const sums = {
-              energy: 0,
-              danceability: 0,
-              valence: 0,
-              acousticness: 0,
-              instrumentalness: 0
-            };
-
-            for (const f of features) {
-              sums.energy += f.energy || 0;
-              sums.danceability += f.danceability || 0;
-              sums.valence += f.valence || 0;
-              sums.acousticness += f.acousticness || 0;
-              sums.instrumentalness += f.instrumentalness || 0;
-            }
-
-            audioFeatures = {
-              energy: sums.energy / features.length,
-              danceability: sums.danceability / features.length,
-              valence: sums.valence / features.length,
-              acousticness: sums.acousticness / features.length,
-              instrumentalness: sums.instrumentalness / features.length
-            };
-          }
-        }
-      }
-    }
+    // Concert matching uses artist genres/popularity. Avoid two additional
+    // requests per artist for optional audio features on the critical path.
+    const audioFeatures = {};
 
     return {
       name: artist.name,
       id: artist.id,
       genres: artist.genres || [],
-      popularity: artist.popularity || 50,
+      popularity: artist.popularity ?? 0,
       audio_features: audioFeatures,
       images: artist.images || []
     };

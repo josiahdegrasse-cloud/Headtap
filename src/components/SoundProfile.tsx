@@ -14,9 +14,9 @@ interface Artist {
 interface Track {
   id: string;
   name: string;
-  artists: { id: string; name: string }[];
+  artists: { id?: string; name: string }[];
   album: {
-    name: string;
+    name?: string;
     release_date: string;
     images?: { url: string }[];
   };
@@ -45,7 +45,7 @@ export function SoundProfile({ artists, savedTracks, audioFeatures }: SoundProfi
 
   // Calculate artist diversity score
   const genreSet = new Set(artists.flatMap(a => a.genres));
-  const diversityScore = Math.min(100, (genreSet.size / artists.length) * 100);
+  const diversityScore = artists.length ? Math.min(100, (genreSet.size / artists.length) * 100) : 0;
 
   // Calculate popularity distribution
   const avgPopularity = artists.reduce((sum, a) => sum + (a.popularity || 50), 0) / artists.length;
@@ -166,7 +166,7 @@ export function SoundProfile({ artists, savedTracks, audioFeatures }: SoundProfi
 
     const moodArtistIds = new Set(mood.artists.map(a => a.id));
     return savedTracks.filter(track => 
-      track.artists.some(a => moodArtistIds.has(a.id))
+      track.artists.some(a => a.id !== undefined && moodArtistIds.has(a.id))
     ).slice(0, 50);
   };
 

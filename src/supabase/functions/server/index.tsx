@@ -1,20 +1,23 @@
 import { Hono } from "npm:hono";
 import { cors } from "npm:hono/cors";
-import { logger } from "npm:hono/logger";
+import { HTTPException } from "npm:hono/http-exception";
 import { timeout } from "npm:hono/timeout";
 import * as kv from "./kv_store.tsx";
 import * as vibe from "./vibe_scoring.tsx";
 import * as appleMusic from "./apple_music.tsx";
 import { getAlternativeRecommendations } from "./recommendations_alternative.tsx";
 
+import { distanceMiles, bestEventImage } from "../../../utils/eventDetails.ts";
+
 const app = new Hono();
 
-const SPOTIFY_CLIENT_ID = Deno.env.get('SPOTIFY_CLIENT_ID') || 'demo-client-id';
+const SPOTIFY_CLIENT_ID = Deno.env.get('SPOTIFY_CLIENT_ID') || '';
 const SPOTIFY_CLIENT_SECRET = Deno.env.get('SPOTIFY_CLIENT_SECRET') || '';
 const TICKETMASTER_API_KEY = Deno.env.get('TICKETMASTER_API_KEY') || '';
 const NEWS_API_KEY = Deno.env.get('NEWS_API_KEY') || '';
 // Change redirect to go back to the app instead of the callback endpoint
 const APP_URL = Deno.env.get('APP_URL') || 'https://headtap.figma.site';
+const allowedRedirects = new Set([APP_URL, ...(Deno.env.get('ALLOWED_APP_URLS') || '').split(',').map(s => s.trim()).filter(Boolean)]);
 const REDIRECT_URI = APP_URL; // Redirect back to the app, which will handle the code
 
 const WINDOW_DAYS = 90;
@@ -34,7 +37,7 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
     return response;
   } catch (error) {
     clearTimeout(timeoutId);
-    if (error.name === 'AbortError') {
+    if (error instanceof Error && error.name === 'AbortError') {
       throw new Error(`Request timeout after ${timeoutMs}ms`);
     }
     throw error;
@@ -86,7 +89,6 @@ async function getValidAccessToken(sessionId: string): Promise<{ access_token: s
   }
 
   // Token expired or about to expire, refresh it
-  console.log(`Refreshing expired token for session ${sessionId}`);
   
   const tokenData = await refreshSpotifyToken(sessionData.refresh_token);
   
@@ -105,13 +107,10 @@ async function getValidAccessToken(sessionId: string): Promise<{ access_token: s
 }
 
 // Enable logger
-app.use('*', logger(console.log));
+// Avoid logging query strings: they contain session credentials.
 
 // Add timeout middleware for all routes (55 seconds - just under the 60s Deno Deploy limit)
-app.use('*', timeout(55000, async (c) => {
-  console.error('Request timeout after 55 seconds');
-  return c.json({ error: 'Request timeout' }, 504);
-}));
+app.use('*', timeout(55000, new HTTPException(504, { message: 'Request timeout' })));
 
 // Enable CORS for all routes and methods
 app.use(
@@ -127,6 +126,7 @@ app.use(
 
 // Global error handler - must come before routes
 app.onError((err, c) => {
+  if (err instanceof HTTPException) return c.json({ error: err.message }, err.status);
   // Handle broken pipe and connection errors gracefully
   if (err.message?.includes('broken pipe') || 
       err.message?.includes('connection') ||
@@ -209,6 +209,7 @@ app.get("/make-server-a9c438e5/debug/env-check", (c) => {
 
 // Spotify OAuth: Generate authorization URL
 app.get("/make-server-a9c438e5/spotify/auth-url", (c) => {
+  if (!SPOTIFY_CLIENT_ID || !SPOTIFY_CLIENT_SECRET) return c.json({ error: 'Spotify connection is not configured' }, 503);
   // Get the app URL from query parameter (passed by frontend)
   const appUrl = c.req.query('app_url');
   
@@ -216,6 +217,7 @@ app.get("/make-server-a9c438e5/spotify/auth-url", (c) => {
     return c.json({ error: 'app_url parameter required' }, 400);
   }
   
+  if (!allowedRedirects.has(appUrl)) return c.json({ error: 'App redirect URL is not configured' }, 400);
   const scopes = [
     'user-top-read',
     'user-read-recently-played',
@@ -236,70 +238,16 @@ app.get("/make-server-a9c438e5/spotify/auth-url", (c) => {
 });
 
 // Spotify OAuth: Handle callback
-app.get("/make-server-a9c438e5/spotify/callback", async (c) => {
-  // Log all incoming request details for debugging
-  console.log('=== SPOTIFY CALLBACK RECEIVED ===');
-  console.log('Full URL:', c.req.url);
-  console.log('Query params:', Object.fromEntries(new URL(c.req.url).searchParams));
-  console.log('Headers:', Object.fromEntries(c.req.raw.headers.entries()));
-  
-  const code = c.req.query('code');
-  const error = c.req.query('error');
-  
-  if (error || !code) {
-    console.log(`Spotify callback error: ${error || 'No code provided'}`);
-    return c.redirect(`${APP_URL}/?error=${error || 'no_code'}`);
-  }
-  
-  try {
-    // Exchange code for access token
-    const tokenResponse = await fetchWithTimeout('https://accounts.spotify.com/api/token', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Authorization': `Basic ${btoa(`${SPOTIFY_CLIENT_ID}:${SPOTIFY_CLIENT_SECRET}`)}`
-      },
-      body: new URLSearchParams({
-        grant_type: 'authorization_code',
-        code,
-        redirect_uri: REDIRECT_URI
-      })
-    }, 10000);
-    
-    const tokenData = await tokenResponse.json();
-    
-    if (!tokenResponse.ok) {
-      console.log(`Spotify token exchange error: ${JSON.stringify(tokenData)}`);
-      return c.redirect(`${APP_URL}/?error=token_exchange_failed`);
-    }
-    
-    // Generate a session ID for the user
-    const sessionId = crypto.randomUUID();
-    
-    // Store tokens in KV store
-    await kv.set(`spotify:session:${sessionId}`, {
-      access_token: tokenData.access_token,
-      refresh_token: tokenData.refresh_token,
-      expires_at: Date.now() + (tokenData.expires_in * 1000)
-    });
-    
-    // Redirect to app with session ID
-    return c.redirect(`${APP_URL}/?session=${sessionId}`);
-  } catch (err) {
-    console.log(`Spotify callback exception: ${err}`);
-    return c.redirect(`${APP_URL}/?error=callback_failed`);
-  }
-});
+app.get("/make-server-a9c438e5/spotify/callback", (c) => c.json({ error: 'Use the registered app origin for Spotify sign-in.' }, 410));
 
-// NEW: Exchange OAuth code for session (called from frontend with auth header)
 app.post("/make-server-a9c438e5/spotify/exchange-code", async (c) => {
   console.log('=== CODE EXCHANGE REQUEST ===');
   
   try {
     const body = await c.req.json();
     const { code, redirect_uri } = body;
+    if (typeof code !== 'string' || typeof redirect_uri !== 'string' || !allowedRedirects.has(redirect_uri)) return c.json({ error: 'Invalid authorization request' }, 400);
     
-    console.log('Request body:', { code: code ? `${code.substring(0, 20)}...` : 'missing', redirect_uri });
     
     if (!code) {
       console.log('ERROR: No code provided');
@@ -359,12 +307,11 @@ app.post("/make-server-a9c438e5/spotify/exchange-code", async (c) => {
       expires_at: Date.now() + (tokenData.expires_in * 1000)
     });
     
-    console.log(`Session created successfully: ${sessionId}`);
     
     return c.json({ sessionId, success: true });
   } catch (err) {
     console.log(`Code exchange exception: ${err}`);
-    console.log(`Exception stack: ${err.stack}`);
+    console.error(err instanceof Error ? err.message : 'Code exchange failed');
     return c.json({ error: 'Server error during code exchange', details: String(err) }, 500);
   }
 });
@@ -393,44 +340,12 @@ app.get("/make-server-a9c438e5/spotify/top-artists", async (c) => {
     
     console.log(`Fetching top artists with time_range=${timeRange}`);
     
-    // Fetch ALL artists using parallel requests for maximum speed
-    // Spotify typically returns up to 200-300 artists max, so we'll fetch 6 batches in parallel
-    const limit = 50;
-    const offsets = [0, 50, 100, 150, 200, 250]; // 6 parallel requests
-    
-    const fetchBatch = async (offset: number) => {
-      try {
-        const response = await fetchWithTimeout(
-          `https://api.spotify.com/v1/me/top/artists?limit=${limit}&offset=${offset}&time_range=${timeRange}`,
-          {
-            headers: {
-              'Authorization': `Bearer ${access_token}`
-            }
-          },
-          15000 // 15 second timeout per batch
-        );
-        
-        if (!response.ok) {
-          return [];
-        }
-        
-        const data = await response.json();
-        return data.items || [];
-      } catch (error) {
-        console.log(`Error fetching batch at offset ${offset}:`, error);
-        return [];
-      }
-    };
-    
-    // Fetch all batches in parallel
-    const batches = await Promise.all(offsets.map(offset => fetchBatch(offset)));
-    
-    // Flatten and filter out empty results
-    const allArtists = batches.flat().filter(artist => artist && artist.id);
-    
-    console.log(`Fetched ${allArtists.length} top artists for time_range=${timeRange} using parallel requests`);
-    
-    return c.json({ items: allArtists });
+    // The profile shows a ranked top-50 sample, not an entire library.
+    const response = await fetchWithTimeout(`https://api.spotify.com/v1/me/top/artists?limit=50&time_range=${encodeURIComponent(timeRange)}`, {headers:{Authorization:`Bearer ${access_token}`}}, 15000);
+    if (!response.ok) return c.json({ error: 'Top artists could not be loaded' }, response.status === 401 ? 401 : response.status === 429 ? 429 : 502);
+    const data = await response.json();
+    return c.json({ items: data.items || [], total: data.total, time_range: timeRange });
+
   } catch (err) {
     console.log(`Error fetching top artists: ${err}`);
     return c.json({ error: 'Server error fetching top artists' }, 500);
@@ -471,7 +386,7 @@ app.get("/make-server-a9c438e5/spotify/top-tracks", async (c) => {
     if (!response.ok) {
       const errorData = await response.text();
       console.log(`Spotify top tracks error: ${errorData}`);
-      return c.json({ error: 'Failed to fetch top tracks' }, response.status);
+      return c.json({ error: 'Failed to fetch top tracks' }, response.status === 401 ? 401 : response.status === 429 ? 429 : 502);
     }
     
     const data = await response.json();
@@ -507,7 +422,9 @@ app.get("/make-server-a9c438e5/spotify/saved-tracks", async (c) => {
     
     // Fetch all saved tracks (Spotify API limit is 50 per request)
     const allTracks = [];
-    let offset = 0;
+    const paged = c.req.query('offset') !== undefined;
+    let offset = Number(c.req.query('offset') || 0);
+    if (!Number.isSafeInteger(offset) || offset < 0) return c.json({error:'Invalid offset'},400);
     const limit = 50;
     let hasMore = true;
     
@@ -515,7 +432,7 @@ app.get("/make-server-a9c438e5/spotify/saved-tracks", async (c) => {
     
     // Fetch ALL saved tracks, no limit
     while (hasMore) {
-      const response = await fetch(
+      const response = await fetchWithTimeout(
         `https://api.spotify.com/v1/me/tracks?limit=${limit}&offset=${offset}`,
         {
           headers: {
@@ -526,14 +443,15 @@ app.get("/make-server-a9c438e5/spotify/saved-tracks", async (c) => {
       
       if (!response.ok) {
         const errorData = await response.text();
-        console.log(`Spotify saved tracks error at offset ${offset}: ${errorData}`);
-        break;
+        console.log(`Spotify saved tracks error at offset ${offset}: ${response.status}`);
+        return c.json({ error: 'Could not load saved tracks. Please retry.' }, response.status === 401 ? 401 : response.status === 429 ? 429 : 502);
       }
       
       const data = await response.json();
       const tracks = data.items || [];
       
       if (tracks.length === 0) {
+        if (paged) return c.json({items:[],total:data.total,nextOffset:null});
         hasMore = false;
         break;
       }
@@ -552,6 +470,7 @@ app.get("/make-server-a9c438e5/spotify/saved-tracks", async (c) => {
         }
       }
       
+      if (paged) return c.json({items:allTracks, total:data.total, nextOffset:data.next ? offset + limit : null});
       offset += limit;
       
       // Check if there are more tracks
@@ -613,7 +532,7 @@ app.get("/make-server-a9c438e5/spotify/audio-features", async (c) => {
     if (!response.ok) {
       const errorData = await response.text();
       console.log(`Spotify audio features error: ${errorData}`);
-      return c.json({ error: 'Failed to fetch audio features' }, response.status);
+      return c.json({ error: 'Failed to fetch audio features' }, response.status === 401 ? 401 : response.status === 429 ? 429 : 502);
     }
     
     const data = await response.json();
@@ -625,6 +544,34 @@ app.get("/make-server-a9c438e5/spotify/audio-features", async (c) => {
 });
 
 // Get ALL artists from saved tracks with full details (genres, popularity, etc.)
+// Resolve only the artist IDs already discovered in the library; never scan it again.
+app.get("/make-server-a9c438e5/spotify/library-artists", async (c) => {
+  const ids = (c.req.query('ids') || '').split(',');
+  if (!ids.length || ids.length > 50 || ids.some(id => !/^[a-zA-Z0-9]{22}$/.test(id))) return c.json({error:'Invalid artist IDs'},400);
+  const session = c.req.query('session');
+  if (!session) return c.json({error:'No session provided'},401);
+  const token = await getValidAccessToken(session);
+  if (!token || token.error) return c.json({error:'Invalid or expired session'},401);
+  const cached:any[] = [];
+  const missing:string[] = [];
+  await Promise.all(ids.map(async id => {
+    try {
+      const entry = await kv.get(`library-artist:${id}`);
+      if (entry?.artist && Date.now()-entry.updatedAt < 7*86400000) {cached.push(entry.artist);return;}
+    } catch { /* Cache failure must not prevent upstream loading. */ }
+    missing.push(id);
+  }));
+  if (!missing.length) return c.json({items:cached});
+  const response = await fetchWithTimeout(`https://api.spotify.com/v1/artists?ids=${missing.join(',')}`, {headers:{Authorization:`Bearer ${token.access_token}`}},15000);
+  if (!response.ok) return c.json({error:'Artist details unavailable. Retry to complete genre coverage.'},response.status === 401 ? 401 : response.status === 429 ? 429 : 502);
+  const data = await response.json();
+  const fresh = (data.artists || []).filter(Boolean);
+  await Promise.all(fresh.map(async (artist:any) => {
+    try {await kv.set(`library-artist:${artist.id}`,{artist,updatedAt:Date.now()});} catch { /* Best-effort public metadata cache. */ }
+  }));
+  return c.json({items:[...cached,...fresh]});
+});
+
 app.get("/make-server-a9c438e5/spotify/saved-artists", async (c) => {
   const sessionId = c.req.query('session');
   
@@ -654,7 +601,7 @@ app.get("/make-server-a9c438e5/spotify/saved-artists", async (c) => {
     console.log('Fetching all saved tracks to extract artists...');
     
     while (hasMore) {
-      const response = await fetch(
+      const response = await fetchWithTimeout(
         `https://api.spotify.com/v1/me/tracks?limit=${limit}&offset=${offset}`,
         {
           headers: {
@@ -704,7 +651,7 @@ app.get("/make-server-a9c438e5/spotify/saved-artists", async (c) => {
     
     for (let i = 0; i < artistIdArray.length; i += 50) {
       const batch = artistIdArray.slice(i, i + 50);
-      const artistResponse = await fetch(
+      const artistResponse = await fetchWithTimeout(
         `https://api.spotify.com/v1/artists?ids=${batch.join(',')}`,
         {
           headers: {
@@ -742,11 +689,17 @@ app.get("/make-server-a9c438e5/spotify/saved-artists", async (c) => {
 
 // Helper to resolve location coordinates
 async function resolveLocation(city?: string, lat?: number, lon?: number) {
-  if (lat && lon) {
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
     return { lat, lon, city: city || "Current" };
   }
   
   if (city) {
+    const coordinates = city.trim().match(/^(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$/);
+    if (coordinates) {
+      const lat = Number(coordinates[1]), lon = Number(coordinates[2]);
+      if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) return { lat, lon, city: city.trim() };
+      throw new HTTPException(400, { message: 'Invalid coordinates' });
+    }
     try {
       const response = await fetchWithTimeout(
         `https://nominatim.openstreetmap.org/search?` +
@@ -760,30 +713,23 @@ async function resolveLocation(city?: string, lat?: number, lon?: number) {
       const results = await response.json();
       if (results && results.length > 0) {
         const loc = results[0];
-        return { lat: parseFloat(loc.lat), lon: parseFloat(loc.lon), city };
+        return { lat: parseFloat(loc.lat), lon: parseFloat(loc.lon), city: loc.display_name || city };
       }
     } catch (e) {
       console.log(`Geocoding error: ${e}`);
     }
   }
   
-  // Fallback to IP geolocation
-  try {
-    const response = await fetchWithTimeout('https://ipapi.co/json/', {}, 5000);
-    const data = await response.json();
-    return { lat: data.latitude, lon: data.longitude, city: data.city };
-  } catch (e) {
-    console.log(`IP geolocation failed: ${e}, using fallback`);
-    // Ultimate fallback: New York
-    return { lat: 40.7128, lon: -74.0060, city: 'New York' };
-  }
+  throw new HTTPException(400, { message: 'Location not found. Enter a city and state or country.' });
 }
 
 // GET /concerts - Find concerts based on user's music taste
 app.get('/make-server-a9c438e5/concerts', async (c) => {
   const sessionId = c.req.query('session');
   const locationQuery = c.req.query('location');
-  const distance = parseInt(c.req.query('distance') || '40'); // Default 40 km (~25 miles)
+  const distance = Number(c.req.query('distance') || '40');
+  if (!Number.isFinite(distance) || distance <= 0 || distance > 1000) return c.json({ error: 'Invalid search distance' }, 400);
+  if (!TICKETMASTER_API_KEY) return c.json({ error: 'Live concert listings are not configured' }, 503); // Default 40 km (~25 miles)
 
   if (!sessionId) {
     return c.json({ error: 'Missing session ID' }, 400);
@@ -793,7 +739,6 @@ app.get('/make-server-a9c438e5/concerts', async (c) => {
     return c.json({ error: 'Missing location' }, 400);
   }
   
-  console.log(`Finding concerts for session ${sessionId} near ${locationQuery} within ${distance}km`);
   
   try {
     const tokenResult = await getValidAccessToken(sessionId);
@@ -810,6 +755,7 @@ app.get('/make-server-a9c438e5/concerts', async (c) => {
     
     // Check cache for user profile
     let userProfile = await kv.get(`spotify:profile:${sessionId}`);
+    if (userProfile && (!userProfile.cached_at || Date.now() - userProfile.cached_at > 86400000)) userProfile = null;
     
     if (!userProfile) {
       // Build user profile from ALL saved tracks
@@ -824,7 +770,7 @@ app.get('/make-server-a9c438e5/concerts', async (c) => {
       console.log('Fetching saved tracks to extract artists...');
       
       while (hasMore) {
-        const response = await fetch(
+        const response = await fetchWithTimeout(
           `https://api.spotify.com/v1/me/tracks?limit=${limit}&offset=${offset}`,
           {
             headers: {
@@ -877,7 +823,7 @@ app.get('/make-server-a9c438e5/concerts', async (c) => {
       for (let i = 0; i < artistIdArray.length; i += 50) {
         const batch = artistIdArray.slice(i, i + 50);
         batchPromises.push(
-          fetch(
+          fetchWithTimeout(
             `https://api.spotify.com/v1/artists?ids=${batch.join(',')}`,
             {
               headers: {
@@ -932,6 +878,7 @@ app.get('/make-server-a9c438e5/concerts', async (c) => {
       };
       
       // Cache for 24 hours (increased from 1 hour for better performance)
+      userProfile.cached_at = Date.now();
       await kv.set(`spotify:profile:${sessionId}`, userProfile);
       console.log(`✅ User profile cached for 24 hours (${allArtists.length} artists)`);
     } else {
@@ -964,7 +911,7 @@ app.get('/make-server-a9c438e5/concerts', async (c) => {
         classificationName: 'music'
       });
       
-      const tmResponse = await fetch(
+      const tmResponse = await fetchWithTimeout(
         `https://app.ticketmaster.com/discovery/v2/events.json?${tmParams}`
       );
       
@@ -1017,13 +964,13 @@ app.get('/make-server-a9c438e5/concerts', async (c) => {
             // Check cache first (7-day TTL for better performance)
             let artistData = await kv.get(cacheKey);
             
-            if (!artistData) {
+            if (!artistData?.cached_at || Date.now() - artistData.cached_at > 7 * 86400000) {
               // Fetch from Spotify
               artistData = await vibe.getSpotifyArtistData(artistName, access_token);
               
               // Cache for 7 days if we got data (artist info rarely changes)
               if (artistData) {
-                await kv.set(cacheKey, artistData);
+                await kv.set(cacheKey, { ...artistData, cached_at: Date.now() });
               }
             }
             
@@ -1072,25 +1019,33 @@ app.get('/make-server-a9c438e5/concerts', async (c) => {
           // Get cached Spotify data
           const spotifyData = artistDataCache.get(mainArtist.toLowerCase());
           
-          // Skip if no Spotify data found (likely not a real artist)
-          if (!spotifyData) {
-            console.log(`⚠️ No Spotify data for "${mainArtist}" - may not be a real artist`);
-            continue;
-          }
+// Ticketmaster events remain visible even when Spotify enrichment is unavailable.
           
           const enrichedEvent = {
+            id: event.id,
             artist: spotifyData?.name || mainArtist,
+            spotify_artist_id: spotifyData?.id || null,
+            currency: event.priceRanges?.[0]?.currency || null,
+            fetched_at: new Date().toISOString(),
             event_name: event.name || '',
             venue: venue?.name || 'Unknown Venue',
-            city: venue?.city?.name || loc.city,
+            city: venue?.city?.name || '',
+            region: venue?.state?.stateCode || venue?.state?.name || '',
+            country: venue?.country?.name || '',
+            address: [venue?.address?.line1, venue?.address?.line2, venue?.city?.name, venue?.state?.stateCode, venue?.postalCode].filter(Boolean).join(', '),
+            venue_lat: venue?.location?.latitude ? Number(venue.location.latitude) : null,
+            venue_lon: venue?.location?.longitude ? Number(venue.location.longitude) : null,
+            distance_miles: venue?.location?.latitude != null && venue?.location?.longitude != null ? distanceMiles(loc.lat!, loc.lon!, Number(venue.location.latitude), Number(venue.location.longitude)) : null,
+            search_location: loc.city,
             date: event.dates?.start?.localDate || '',
             url: event.url,
-            price_min: event.priceRanges?.[0]?.min || null,
-            price_max: event.priceRanges?.[0]?.max || null,
+            price_min: event.priceRanges?.[0]?.min ?? null,
+            price_max: event.priceRanges?.[0]?.max ?? null,
             genres: spotifyData?.genres || [],
-            popularity: spotifyData?.popularity || 30,
+            popularity: spotifyData?.popularity ?? 0,
             audio_profile: spotifyData?.audio_features || {},
-            imageUrl: event.images?.[0]?.url || `https://picsum.photos/seed/${mainArtist}/400/300`,
+            imageUrl: bestEventImage(spotifyData?.images, event.images),
+            fallbackImageUrl: bestEventImage([], event.images),
             vibe_score: 0
           };
           
@@ -1103,7 +1058,7 @@ app.get('/make-server-a9c438e5/concerts', async (c) => {
           
           enrichedEvent.vibe_score = Math.round(score * 10) / 10;
           (enrichedEvent as any).matchScore = enrichedEvent.vibe_score;
-          (enrichedEvent as any).matchReasons = reasons;
+          (enrichedEvent as any).matchReasons = spotifyData ? reasons : ['Artist match details are unavailable'];
           enrichedEvents.push(enrichedEvent);
         }
         
@@ -1120,47 +1075,9 @@ app.get('/make-server-a9c438e5/concerts', async (c) => {
       }
     }
     
-    // Fallback: Generate mock data based on top artists
-    console.log('Using mock concert data (no Ticketmaster API key)');
-    const topArtists = userProfile.artists.slice(0, 6);
-    
-    const concerts = topArtists.map((artist: string, idx: number) => {
-      const dates = [
-        new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-        new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
-        new Date(Date.now() + 21 * 24 * 60 * 60 * 1000),
-        new Date(Date.now() + 28 * 24 * 60 * 60 * 1000),
-        new Date(Date.now() + 35 * 24 * 60 * 60 * 1000),
-        new Date(Date.now() + 42 * 24 * 60 * 60 * 1000),
-      ];
-      
-      const venues = [
-        'Madison Square Garden',
-        'The Beacon Theatre',
-        'Brooklyn Steel',
-        'Terminal 5',
-        'Radio City Music Hall',
-        'Forest Hills Stadium'
-      ];
-      
-      return {
-        id: `concert-${idx}`,
-        artist,
-        event_name: `${artist} Live`,
-        date: dates[idx].toISOString().split('T')[0],
-        venue: venues[idx],
-        city: loc.city,
-        location: loc.city,
-        price: Math.floor(Math.random() * 80) + 40,
-        price_min: Math.floor(Math.random() * 80) + 40,
-        url: `https://ticketmaster.com`,
-        imageUrl: `https://picsum.photos/seed/${artist}/400/300`,
-        vibe_score: 90 - (idx * 5) // Simulated high scores for top artists
-      };
-    });
-    
-    return c.json({ concerts, location: loc.city, source: 'mock' });
+    return c.json({ error: 'Live concert listings are unavailable. Please try again later.' }, 502);
   } catch (err) {
+    if (err instanceof HTTPException) return c.json({ error: err.message }, err.status);
     console.log(`Error fetching concerts: ${err}`);
     return c.json({ error: 'Server error fetching concerts' }, 500);
   }
@@ -1203,7 +1120,7 @@ app.post('/make-server-a9c438e5/playlists/create', async (c) => {
     });
     
     if (!meResponse.ok) {
-      return c.json({ error: 'Failed to get user info' }, meResponse.status);
+      return c.json({ error: 'Failed to get user info' }, meResponse.status === 401 ? 401 : meResponse.status === 429 ? 429 : 502);
     }
     
     const userData = await meResponse.json();
@@ -1212,7 +1129,7 @@ app.post('/make-server-a9c438e5/playlists/create', async (c) => {
     console.log(`Creating playlist "${name}" for user ${userId} with ${track_uris.length} tracks`);
     
     // Create playlist
-    const createResponse = await fetch(
+    const createResponse = await fetchWithTimeout(
       `https://api.spotify.com/v1/users/${userId}/playlists`,
       {
         method: 'POST',
@@ -1231,7 +1148,7 @@ app.post('/make-server-a9c438e5/playlists/create', async (c) => {
     if (!createResponse.ok) {
       const errorData = await createResponse.text();
       console.log(`Failed to create playlist: ${errorData}`);
-      return c.json({ error: 'Failed to create playlist' }, createResponse.status);
+      return c.json({ error: 'Failed to create playlist' }, createResponse.status === 401 ? 401 : createResponse.status === 429 ? 429 : 502);
     }
     
     const playlistData = await createResponse.json();
@@ -1242,7 +1159,7 @@ app.post('/make-server-a9c438e5/playlists/create', async (c) => {
     for (let i = 0; i < track_uris.length; i += chunkSize) {
       const chunk = track_uris.slice(i, i + chunkSize);
       
-      const addTracksResponse = await fetch(
+      const addTracksResponse = await fetchWithTimeout(
         `https://api.spotify.com/v1/playlists/${playlistId}/tracks`,
         {
           method: 'POST',
@@ -1326,7 +1243,7 @@ app.get('/make-server-a9c438e5/artist-news', async (c) => {
           from: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0] // Last 30 days
         });
         
-        const newsResponse = await fetch(
+        const newsResponse = await fetchWithTimeout(
           `https://newsapi.org/v2/everything?${newsParams}`
         );
         
@@ -1434,7 +1351,7 @@ app.get('/make-server-a9c438e5/artist-news', async (c) => {
               
               // REQUIREMENT #8: Article must be primarily ABOUT the artist (artist name near start of title)
               const titleWords = titleText.split(' ');
-              const artistFirstWordIndex = titleWords.findIndex(word => artistLower.split(' ')[0] === word);
+              const artistFirstWordIndex = titleWords.findIndex((word: string) => artistLower.split(' ')[0] === word);
               const artistMentionedEarly = artistFirstWordIndex >= 0 && artistFirstWordIndex < 8; // Within first 8 words
               
               if (!artistMentionedEarly) {
@@ -1572,7 +1489,7 @@ app.get('/make-server-a9c438e5/recommendation-genres', async (c) => {
     if (!response.ok) {
       const errorText = await response.text();
       console.log(`❌ Error fetching genre seeds: ${errorText}`);
-      return c.json({ error: 'Failed to fetch genre seeds', details: errorText, status: response.status }, response.status);
+      return c.json({ error: 'Failed to fetch genre seeds', details: errorText, status: response.status }, response.status === 401 ? 401 : response.status === 429 ? 429 : 502);
     }
     
     const data = await response.json();
@@ -1593,7 +1510,6 @@ app.get('/make-server-a9c438e5/recommendations', async (c) => {
   const limit = parseInt(c.req.query('limit') || '20');
   
   console.log(`🎵 RECOMMENDATIONS ENDPOINT CALLED - Version 3.0 (Alternative approach)`);
-  console.log(`📊 Request params: session=${sessionId ? 'present' : 'missing'}, genre=${genre}, limit=${limit}`);
   
   if (!sessionId) {
     return c.json({ error: 'No session provided' }, 401);
@@ -1620,16 +1536,8 @@ app.get('/make-server-a9c438e5/recommendations', async (c) => {
   }
 });
 
-// Serve with connection handling
-Deno.serve({
-  handler: app.fetch,
-  onError: (error) => {
-    // Handle broken pipe and other connection errors gracefully
-    if (error.message?.includes('broken pipe') || error.message?.includes('connection')) {
-      console.log('Client disconnected:', error.message);
-      return new Response(null, { status: 499 }); // Client closed request
-    }
-    console.error('Server error:', error);
-    return new Response('Internal Server Error', { status: 500 });
-  }
-});
+export { app };
+export function serve() {
+  return Deno.serve({ handler: app.fetch });
+}
+if (import.meta.main) serve();

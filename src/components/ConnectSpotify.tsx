@@ -104,7 +104,7 @@ export function ConnectSpotify({ onConnect, onDemo, loading }: ConnectSpotifyPro
         </div>
         
         <p className="text-xs text-white/60 mt-6">
-          We only read your music preferences. We never post or modify anything.
+          We read your music preferences and request permission to create playlists.
         </p>
       </div>
     </div>

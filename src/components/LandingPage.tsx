@@ -95,7 +95,7 @@ export function LandingPage({ onConnect, onDemo, loading }: LandingPageProps) {
             
             <p className="text-sm text-gray-500 flex items-center justify-center gap-2">
               <span className="w-2 h-2 bg-orange-500 rounded-full"></span>
-              Read-only access • We never post or modify your data
+              Reads your music taste • Requests permission to create playlists
             </p>
           </div>
         </div>
