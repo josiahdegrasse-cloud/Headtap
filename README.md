@@ -254,3 +254,10 @@ slider with visible choice buttons and three discovery cards: Familiar favorites
 A bit of both, and Something new. Budget presets retain a custom numeric option.
 Selection outlines and pressed states expose current choices; advanced genre and
 group-budget controls remain secondary. The music-first organization is unchanged.
+
+### Installable phone app and show alerts
+
+HeadTap now includes PWA installation support and **Concerts → Show alerts**.
+See [phone alert setup](docs/phone-alerts.md) for deployment, authentication,
+scheduling, iPhone installation and current limitations. Push delivery requires
+backend activation; the UI does not claim alerts are enabled before subscribing.

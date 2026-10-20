@@ -1,3 +1,4 @@
+import { ShowAlerts } from './ShowAlerts';
 import {stopListening} from './ArtistListening';
 import {nightOutPicks,weekendRange} from '../utils/nightOut';
 import {ShowShortlist} from './ShowShortlist';
@@ -28,7 +29,7 @@ interface DashboardProps {
 
 export function Dashboard({ sessionId, onLogout, demoMode = false }: DashboardProps) {
   const {preferences,setPreferences,ready:preferencesReady,error:preferencesError} = useDiscovery(demoMode ? 'demo' : sessionId || 'anonymous');
-  const [activeTab,setActiveTabState] = useState('profile');
+  const [activeTab,setActiveTabState] = useState(new URLSearchParams(window.location.search).get('view')==='alerts'?'concerts':'profile');
   const savedOnly=activeTab==='saved';
   const scrollPositions=useRef<Record<string,number>>({});
   const setActiveTab=(next:string)=>{
@@ -562,6 +563,7 @@ export function Dashboard({ sessionId, onLogout, demoMode = false }: DashboardPr
                 Based on {profileArtists.length} loaded artists and your discovery preferences
               </p>
 
+              <ShowAlerts sessionId={sessionId} artists={profileArtists} libraryLoading={libraryLoading || loading} demoMode={demoMode}/>
               <form onSubmit={(event) => { event.preventDefault(); handleLocationSearch(); }} className="mb-5 rounded-xl border border-stone-200 bg-white p-3 sm:p-4">
                 <label htmlFor="concert-location" className="block text-sm font-semibold text-stone-700 mb-2">Where do you want to go?</label>
                 <div className="grid grid-cols-2 sm:grid-cols-[minmax(0,1fr)_auto_auto] gap-2">

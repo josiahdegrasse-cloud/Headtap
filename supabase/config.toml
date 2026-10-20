@@ -3,3 +3,8 @@ project_id = "headtap"
 [functions.make-server-a9c438e5]
 verify_jwt = true
 entrypoint = "./functions/make-server-a9c438e5/index.ts"
+
+[functions.show-alerts]
+# The handler authenticates Spotify sessions and a separate scheduler secret itself.
+verify_jwt = false
+entrypoint = "./functions/show-alerts/index.ts"

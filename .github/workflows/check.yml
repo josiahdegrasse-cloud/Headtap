@@ -18,4 +18,4 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.9.6
-      - run: deno test --node-modules-dir=none --allow-env tests/backend.test.ts
+      - run: deno test --node-modules-dir=none --allow-env tests/backend.test.ts tests/pushWorker.test.ts
